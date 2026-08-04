@@ -1,16 +1,24 @@
+import os
 from flask import Flask, render_template, request, jsonify
+from supabase import create_client, Client
 
 app = Flask(__name__)
+
+# Supabase 클라이언트 설정 (환경 변수 또는 기본값)
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+
+supabase: Client = None
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    except Exception as e:
+        print(f"Supabase 연결 실패: {e}")
 
 def calculate_bmi(height_cm, weight_kg):
     """
     키(cm)와 몸무게(kg)를 입력받아 BMI를 계산합니다.
-    대한비만학회 기준:
-    - 18.5 미만: 저체중
-    - 18.5 이상 ~ 23 미만: 정상
-    - 23 이상 ~ 25 미만: 비만전단계 (과체중)
-    - 25 이상 ~ 30 미만: 1단계 비만
-    - 30 이상: 2단계 고도비만
+    대한비만학회(KSSO) 진단 기준 적용
     """
     height_m = height_cm / 100.0
     if height_m <= 0:
@@ -61,6 +69,29 @@ def calculate_bmi(height_cm, weight_kg):
         "weight": weight_kg
     }
 
+def save_to_supabase(result):
+    """Supabase bmi_records 테이블에 측정 기록 저장"""
+    if supabase:
+        try:
+            supabase.table("bmi_records").insert({
+                "height": result["height"],
+                "weight": result["weight"],
+                "bmi": result["bmi"],
+                "category": result["category"]
+            }).execute()
+        except Exception as e:
+            print(f"Supabase 데이터 저장 오류: {e}")
+
+def get_supabase_history():
+    """Supabase에서 최근 측정 기록 5건 조회"""
+    if supabase:
+        try:
+            res = supabase.table("bmi_records").select("*").order("created_at", desc=True).limit(5).execute()
+            return res.data or []
+        except Exception as e:
+            print(f"Supabase 데이터 조회 오류: {e}")
+    return []
+
 @app.route("/", methods=["GET", "POST"])
 def index():
     result = None
@@ -77,10 +108,13 @@ def index():
                 error = "올바른 범위의 키와 몸무게를 입력해주세요."
             else:
                 result = calculate_bmi(height, weight)
+                # Supabase DB에 저장
+                save_to_supabase(result)
         except (ValueError, TypeError):
             error = "올바른 숫자 형식으로 입력해주세요."
             
-    return render_template("index.html", result=result, error=error)
+    history = get_supabase_history()
+    return render_template("index.html", result=result, error=error, history=history, supabase_connected=bool(supabase))
 
 @app.route("/api/calculate", methods=["POST"])
 def api_calculate():
@@ -95,10 +129,10 @@ def api_calculate():
             return jsonify({"success": False, "error": "올바른 범위의 키와 몸무게를 입력해주세요."}), 400
             
         result = calculate_bmi(height, weight)
+        save_to_supabase(result)
         return jsonify({"success": True, "data": result})
     except (ValueError, TypeError):
         return jsonify({"success": False, "error": "올바른 숫자 형식으로 입력해주세요."}), 400
 
 if __name__ == "__main__":
-    print("Flask BMI Calculator running on http://127.0.0.1:5000")
     app.run(debug=True, host="127.0.0.1", port=5000)
